@@ -8,6 +8,14 @@
 (define-constant ERR_ALREADY_CLAIMED (err u106))
 (define-constant ERR_INSUFFICIENT_BALANCE (err u107))
 (define-constant ERR_INVALID_PARTICIPANT (err u108))
+(define-constant ERR_INSURANCE_NOT_FOUND (err u109))
+(define-constant ERR_INSURANCE_ALREADY_EXISTS (err u110))
+(define-constant ERR_CLAIM_PERIOD_EXPIRED (err u111))
+(define-constant ERR_INSUFFICIENT_INSURANCE_POOL (err u112))
+(define-constant ERR_INVALID_INSURANCE_AMOUNT (err u113))
+
+(define-data-var insurance-pool uint u0)
+(define-data-var insurance-fee-rate uint u5)
 
 (define-data-var crop-counter uint u0)
 
@@ -226,5 +234,92 @@
       investor-pool: (/ (* (get harvest-revenue crop-data) (get investor-percentage crop-data)) u100),
       coop-pool: (/ (* (get harvest-revenue crop-data) (get coop-percentage crop-data)) u100)
     })
+  )
+)
+
+
+(define-map crop-insurance
+  uint
+  {
+    coverage-amount: uint,
+    premium-paid: uint,
+    claim-deadline: uint,
+    is-claimed: bool,
+    purchaser: principal
+  }
+)
+
+(define-map insurance-contributors
+  principal
+  { contributed-amount: uint, share-percentage: uint }
+)
+
+(define-read-only (get-insurance-pool)
+  (var-get insurance-pool)
+)
+
+(define-read-only (get-crop-insurance (crop-id uint))
+  (map-get? crop-insurance crop-id)
+)
+
+(define-read-only (get-insurance-contributor (contributor principal))
+  (map-get? insurance-contributors contributor)
+)
+
+(define-read-only (calculate-insurance-premium (coverage-amount uint))
+  (/ (* coverage-amount (var-get insurance-fee-rate)) u100)
+)
+
+(define-public (contribute-to-insurance-pool (amount uint))
+  (let ((current-pool (var-get insurance-pool))
+        (existing-contrib (default-to { contributed-amount: u0, share-percentage: u0 }
+          (map-get? insurance-contributors tx-sender))))
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    (let ((new-pool (+ current-pool amount))
+          (new-contrib-amount (+ (get contributed-amount existing-contrib) amount)))
+      (var-set insurance-pool new-pool)
+      (map-set insurance-contributors tx-sender {
+        contributed-amount: new-contrib-amount,
+        share-percentage: (/ (* new-contrib-amount u100) new-pool)
+      })
+      (ok true)
+    )
+  )
+)
+
+(define-public (purchase-crop-insurance (crop-id uint) (coverage-amount uint))
+  (let ((crop-data (unwrap! (map-get? crops crop-id) ERR_CROP_NOT_FOUND))
+        (premium (calculate-insurance-premium coverage-amount)))
+    (asserts! (not (get is-harvested crop-data)) ERR_CROP_ALREADY_HARVESTED)
+    (asserts! (> coverage-amount u0) ERR_INVALID_INSURANCE_AMOUNT)
+    (asserts! (is-none (map-get? crop-insurance crop-id)) ERR_INSURANCE_ALREADY_EXISTS)
+    (try! (stx-transfer? premium tx-sender (as-contract tx-sender)))
+    (var-set insurance-pool (+ (var-get insurance-pool) premium))
+    (map-set crop-insurance crop-id {
+      coverage-amount: coverage-amount,
+      premium-paid: premium,
+      claim-deadline: (+ stacks-block-height u1000),
+      is-claimed: false,
+      purchaser: tx-sender
+    })
+    (ok true)
+  )
+)
+
+(define-public (claim-crop-insurance (crop-id uint))
+  (let ((crop-data (unwrap! (map-get? crops crop-id) ERR_CROP_NOT_FOUND))
+        (insurance-data (unwrap! (map-get? crop-insurance crop-id) ERR_INSURANCE_NOT_FOUND))
+        (current-pool (var-get insurance-pool)))
+    (asserts! (is-eq tx-sender (get purchaser insurance-data)) ERR_UNAUTHORIZED)
+    (asserts! (get is-harvested crop-data) ERR_CROP_NOT_HARVESTED)
+    (asserts! (<= stacks-block-height (get claim-deadline insurance-data)) ERR_CLAIM_PERIOD_EXPIRED)
+    (asserts! (not (get is-claimed insurance-data)) ERR_ALREADY_CLAIMED)
+    (asserts! (<= (get harvest-revenue crop-data) (/ (get coverage-amount insurance-data) u4)) ERR_INVALID_AMOUNT)
+    (asserts! (>= current-pool (get coverage-amount insurance-data)) ERR_INSUFFICIENT_INSURANCE_POOL)
+    (try! (as-contract (stx-transfer? (get coverage-amount insurance-data) tx-sender (get purchaser insurance-data))))
+    (var-set insurance-pool (- current-pool (get coverage-amount insurance-data)))
+    (map-set crop-insurance crop-id (merge insurance-data { is-claimed: true }))
+    (ok (get coverage-amount insurance-data))
   )
 )
