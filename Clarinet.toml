@@ -21,6 +21,11 @@ epoch = 3.1
 path = 'contracts/crop-lending-system.clar'
 clarity_version = 3
 epoch = 3.1
+[contracts.crop-prediction-market]
+path = 'contracts/crop-prediction-market.clar'
+clarity_version = 3
+epoch = 3.1
+
 [repl.analysis]
 passes = ['check_checker']
 
